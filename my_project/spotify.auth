@@ -1,0 +1,312 @@
+#!/usr/bin/pthon3
+import requests
+from datetime import datetime, timedelta
+from flask import Flask, redirect, request, jsonify, session
+import urllib.parse
+import logging
+
+app = Flask(__name__)
+app.secret_key = 'Ezenagu101#'
+
+CLIENT_ID='20f9abbba2dd46868feb34d3111352f0'
+CLIENT_SECRET_ID='dbdc5330d9bf4cd591ea9c56cc646d87'
+REDIRECT_URI='http://localhost:5000/callback'
+
+AUTH_URL = 'https://accounts.spotify.com/authorize'
+TOKEN_URL = 'https://accounts.spotify.com/api/token'
+API_BASE_URL = 'https://api.spotify.com/v1/'
+
+logging.basicConfig(level=logging.DEBUG)
+
+@app.route('/')
+def home():
+    return """
+    <h1>Welcome to AudioAlly</h1>
+    <a href='/login'>Login with Spotify</a>
+    <form action="/create_recommendation_playlist" method="post" style="margin-top: 20px;">
+        <div>
+            <label for="artists">Favorite Artists (comma separated):</label>
+            <input type="text" id="artists" name="artists" required>
+        </div>
+        <div>
+            <label for="genres">Favorite Genres (comma separated):</label>
+            <input type="text" id="genres" name="genres" required>
+        </div>
+        <div>
+            <label for="location">Geographic Location:</label>
+            <input type="text" id="location" name="location" required>
+        </div>
+        <div>
+            <label for="trends">Current Trends (comma separated track IDs, optional):</label>
+            <input type="text" id="trends" name="trends">
+        </div>
+        <button type="submit">Create Personalized Playlist</button>
+    </form>
+    """
+
+@app.route('/login')
+def login():
+    scope = 'user-read-private user-read-email playlist-read-private playlist-read-collaborative playlist-modify-public'
+    params = {
+        'client_id': CLIENT_ID,
+        'response_type': 'code',
+        'scope': scope,
+        'redirect_uri': REDIRECT_URI,
+        'show_dialog': True
+    }
+
+    auth_url = f"{AUTH_URL}?{urllib.parse.urlencode(params)}"
+    logging.debug(f"Redirecting to Spotify auth URL: {auth_url}")
+    return redirect(auth_url)
+
+@app.route('/callback')
+def callback():
+    if 'error' in request.args:
+        logging.error(f"Error received in callback: {request.args['error']}")
+        return jsonify({"error": request.args['error']})
+    
+    # if datetime.now().timestamp() > session['expires_at']:
+    if 'code' in request.args:
+        req_body = {
+            'code': request.args['code'],
+            'grant_type': 'authorization_code',
+            'redirect_uri': REDIRECT_URI,
+            'client_id': CLIENT_ID,
+            'client_secret': CLIENT_SECRET_ID
+        }
+
+        #Send to req_body to spotify API through token url
+        logging.debug(f"Requesting token with body: {req_body}")
+        response = requests.post(TOKEN_URL, data=req_body)
+        logging.debug(f"Token response status: {response.status_code}")
+        logging.debug(f"Token response: {response.json()}")
+        
+        # get token
+        if response.status_code != 200:
+            return jsonify({"error": "Failed to retrieve token", "response": response.json()})
+
+        token_info = response.json()
+
+        # if response.status_code != 200:
+        #     return jsonify({"error": "Failed to retrieve token", "response": token_info})
+
+        #Retrieve wanted info from token
+        access_token = token_info.get('access_token') # used to make request to spotify api
+        refresh_token = token_info.get('refresh_token') # refreshes access token when it expires
+        expires_in = token_info.get('expires_in') # number of seconds access token lasts
+
+        if not access_token or not refresh_token or not expires_in:
+            logging.error(f"Token response missing required fields: {token_info}")
+            return jsonify({"error": "Failed to retrieve complete token information", "response": token_info})
+        
+        # create a session 
+        session['access_token'] = access_token
+        session['refresh_token'] = refresh_token
+        session['expires_at'] = datetime.now().timestamp() + expires_in
+
+        # use access token to get playlist
+        logging.debug(f"Session created with access token: {access_token}")
+        return redirect('/playlists')
+
+@app.route('/playlists')
+def user_playlist():
+    # Check if access token is in session
+    if 'access_token' not in session:
+        logging.debug("Access token not found in session. Redirecting to /login.")
+        return redirect('/login')
+    # Check if access token has expires
+    if datetime.now().timestamp() > session['expires_at']:
+        logging.debug("Access token has expired. Redirecting to /refresh_token.")
+        return redirect('/redirect-token')
+    
+    headers = {
+        'Authorization': f"Bearer {session['access_token']}",
+        # "Content-Type": "application/json",
+        # "Accept": "application/json"
+    }
+
+    # Spotify API endpoint for getting the current user's playlist
+    # https://api.spotify.com/v1/me/playlists
+    # https://api.spotify.com/v1/31t3wzqxii6bwmmsdffqd7tbwgku/playlists
+
+    logging.debug("Fetching user playlists from Spotify.")
+    response = requests.get(API_BASE_URL + 'me/playlists', headers=headers)
+    logging.debug(f"Playlists response status: {response.status_code}")
+
+    if response.status_code == 200:
+        playlists = response.json()
+        # Extract only the URLs to the playlists
+        logging.debug(f"Playlists fetched: {playlists}")
+        playlist_urls = [item['external_urls']['spotify'] for item in playlists['items']]
+        return jsonify({"playlists_urls": playlist_urls})
+    else:
+        logging.error(f"Error fetching playlists: {response.status_code}")
+        return jsonify({"error": f"Error fetching playlists: {response.status_code}"})
+
+#Refresh token
+@app.route('/refresh_token')
+def refresh_token():
+    if 'refresh_token' not in session:
+        logging.debug("Refresh token not found in session. Redirecting to /login.")
+        return redirect('/login')
+
+    req_body = {
+        'grant_type': 'refresh_token',
+        'refresh_token': session['refresh_token'],
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET_ID
+    }
+    
+    logging.debug(f"Refreshing token with body: {req_body}")
+    response = requests.post(TOKEN_URL, data=req_body)
+    logging.debug(f"Refresh token response status: {response.status_code}")
+    logging.debug(f"Refresh token response: {response.json()}")
+    # new_token_info = response.json()
+
+    if response.status_code == 200:
+        new_token_info = response.json()
+        session['access_token'] = new_token_info['access_token']
+        session['expires_at'] = datetime.now().timestamp() + new_token_info['expires_in']
+        return redirect('/playlists')
+    else:
+        logging.error(f"Error refreshing token: {response.status_code}")
+        return jsonify({"error": f"Error refreshing token: {response.status_code}"})
+
+def get_recent_tracks(access_token):
+    headers = {
+        'Authorization': f"Bearer {access_token}",
+        'Content-Type': 'application/json'
+    }
+
+    current_year = datetime.now().year
+    recent_tracks = []
+
+    for year in range(current_year - 1, current_year + 1):
+        query = f'year:{year}'
+        params = {
+            'q': query,
+            'type': 'track',
+            'limit': 50
+        }
+        
+        response = requests.get(API_BASE_URL + 'search', headers=headers, params=params)
+        
+        if response.status_code != 200:
+            logging.error(f"Error fetching recent tracks for year {year}: {response.status_code}")
+            continue
+        
+        tracks_data = response.json()
+        recent_tracks.extend([track['id'] for track in tracks_data['tracks']['items']])
+    
+    return list(set(recent_tracks))
+
+def get_trending_tracks(access_token):
+    headers = {
+        'Authorization': f"Bearer {access_token}",
+        'Content-Type': 'application/json'
+    }
+    
+    trending_tracks = []
+    featured_playlists_response = requests.get(API_BASE_URL + 'browse/featured-playlists', headers=headers)
+    
+    if featured_playlists_response.status_code != 200:
+        logging.error(f"Error fetching featured playlists: {featured_playlists_response.status_code}")
+        return trending_tracks
+
+    playlists = featured_playlists_response.json()
+    for playlist in playlists['playlists']['items']:
+        playlist_id = playlist['id']
+        tracks_response = requests.get(API_BASE_URL + f'playlists/{playlist_id}/tracks', headers=headers)
+        
+        if tracks_response.status_code == 200:
+            tracks_data = tracks_response.json()
+            trending_tracks.extend([track['track']['id'] for track in tracks_data['items'] if track['track']])
+    
+    return list(set(trending_tracks))
+
+def get_recommendations(access_token, seed_artists, seed_genres, seed_tracks, country):
+    headers = {
+        'Authorization': f"Bearer {access_token}",
+        'Content-Type': 'application/json'
+    }
+    
+    params = {
+        'seed_artists': ','.join(seed_artists[:5]),
+        'seed_genres': ','.join(seed_genres[:5]),
+        'seed_tracks': ','.join(seed_tracks[:5]),
+        'market': country,
+        'limit': 20
+    }
+    
+    recommendations_response = requests.get(API_BASE_URL + 'recommendations', headers=headers, params=params)
+    
+    if recommendations_response.status_code != 200:
+        logging.error(f"Error fetching recommendations: {recommendations_response.status_code}")
+        return None
+    
+    recommendations_data = recommendations_response.json()
+    track_ids = [track['id'] for track in recommendations_data['tracks']]
+    
+    return track_ids
+
+@app.route('/create_recommendation_playlist', methods=['POST'])
+def create_recommendation_playlist():
+    if 'access_token' not in session:
+        logging.debug("Access token not found in session. Redirecting to /login.")
+        return redirect('/login')
+    
+    if datetime.now().timestamp() > session['expires_at']:
+        logging.debug("Access token has expired. Redirecting to /refresh_token.")
+        return redirect('/refresh_token')
+    
+    access_token = session['access_token']
+
+    # Define headers with authorization token
+    headers = {
+        'Authorization': f"Bearer {access_token}",
+    }
+
+    # Get user input from the form
+    favorite_artists = request.form.get('artists').split(',')
+    favorite_genres = request.form.get('genres').split(',')
+    location = request.form.get('location')
+    trends = request.form.get('trends')
+
+    # Get recent tracks and trending tracks
+    recent_tracks = get_recent_tracks(access_token)
+    trending_tracks = get_trending_tracks(access_token)
+
+    # Use the Spotify API to get recommendations based on user preferences
+    recommendations = get_recommendations(access_token, favorite_artists, favorite_genres, recent_tracks + trending_tracks, location)
+
+    if recommendations:
+        # Create a new playlist using the Spotify API
+        playlist_name = "Your Personalized Playlist"
+        playlist_description = "Created based on your favorite artists, genres, and current trends."
+        playlist_response = requests.post(API_BASE_URL + 'users/{user_id}/playlists', headers=headers, json={
+            'name': playlist_name,
+            'description': playlist_description,
+            'public': True  # Adjust privacy settings as needed
+        })
+        
+        if playlist_response.status_code == 201:
+            playlist_data = playlist_response.json()
+            playlist_id = playlist_data['id']
+            
+            # Add tracks to the playlist
+            add_tracks_response = requests.post(API_BASE_URL + f'playlists/{playlist_id}/tracks', headers=headers, json={
+                'uris': ['spotify:track:' + track_id for track_id in recommendations]
+            })
+            
+            if add_tracks_response.status_code == 201:
+                return jsonify({"message": "Playlist created successfully!", "playlist_id": playlist_id})
+            else:
+                return jsonify({"error": "Failed to add tracks to the playlist.", "response": add_tracks_response.json()})
+        else:
+            return jsonify({"error": "Failed to create playlist.", "response": playlist_response.json()})
+    else:
+        return jsonify({"error": "Failed to get recommendations."})
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', debug=True)

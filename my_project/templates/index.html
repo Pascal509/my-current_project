@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Create Spotify Playlist</title>
+</head>
+
+<body>
+    <h1>Create Spotify Playlist</h1>
+    <form action="/create_playlist" method="post">
+        <label for="genre">Select a music genre:</label>
+        <select name="genre" id="genre"> <!-- {'genre': 'pop'}-->
+            <option value="rock">Rock</option>
+            <option value="pop">Pop</option>
+            <option value="hip-hop">Hip Hop</option>
+            <!-- Add more genres(dynamically) as needed -->
+        </select>
+        <button type="submit">Create Playlist</button>
+    </form>
+</body>
+</html>
